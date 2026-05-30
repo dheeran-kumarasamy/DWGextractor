@@ -6,6 +6,7 @@ project(DXFRW VERSION 1.0.1)
 set(LIBDXFRW_BUILD_DOC TRUE CACHE BOOL "Build the documentation")
 set(LIBDXFRW_BUILD_DWG2DXF TRUE CACHE BOOL "Build the dwg2dxf application")
 set(LIBDXFRW_BUILD_TESTS TRUE CACHE BOOL "Build the DWG read tests (requires dwg2dxf)")
+set(LIBDXFRW_BUILD_ENTITY_EXTRACTOR TRUE CACHE BOOL "Build the dwg_entity_types extraction tool")
 
 
 # set compiler warnings
@@ -112,13 +113,19 @@ if(LIBDXFRW_BUILD_DOC)
 	    DEPENDS doc/html/index.html)
 endif()
 
-if(LIBDXFRW_BUILD_DWG2DXF)
+if(LIBDXFRW_BUILD_DWG2DXF AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/dwg2dxf)
     add_subdirectory(dwg2dxf)
 endif()
 
-if(LIBDXFRW_BUILD_TESTS AND LIBDXFRW_BUILD_DWG2DXF)
+if(LIBDXFRW_BUILD_TESTS AND LIBDXFRW_BUILD_DWG2DXF AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/dwg2dxf)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+if(LIBDXFRW_BUILD_ENTITY_EXTRACTOR)
+  add_executable(dwg_entity_types tools/dwg_entity_types.cpp)
+  target_link_libraries(dwg_entity_types PRIVATE dxfrw)
+  target_compile_features(dwg_entity_types PRIVATE cxx_std_14)
 endif()
 
 # INSTALLATION
