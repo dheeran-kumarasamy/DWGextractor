@@ -70,6 +70,23 @@ if uploaded is not None:
         entities_df = pd.DataFrame(result.entities)
         layers_df = pd.DataFrame(result.layers)
         types_df = pd.DataFrame(result.entity_types)
+        feature_counts = result.feature_counts or {"walls": 0, "windows": 0, "doors": 0}
+        features_df = pd.DataFrame(result.feature_entities)
+
+        measurement_cols = [
+            "measurement_length",
+            "measurement_area",
+            "measurement_radius",
+            "measurement_perimeter",
+        ]
+        present_measurement_cols = [col for col in measurement_cols if col in entities_df.columns]
+        if present_measurement_cols:
+            non_empty_measurements = entities_df[present_measurement_cols].fillna("").astype(str).apply(
+                lambda col: col.str.strip() != ""
+            )
+            measurable_entities_df = entities_df[non_empty_measurements.any(axis=1)].copy()
+        else:
+            measurable_entities_df = entities_df.iloc[0:0].copy()
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Entity rows", len(entities_df.index))
@@ -81,7 +98,12 @@ if uploaded is not None:
                 total = hit.iloc[0]["count"]
         c3.metric("Total entities", total if total is not None else len(entities_df.index))
 
-        tabs = st.tabs(["Entities", "Layers", "Entity Types"])
+        f1, f2, f3 = st.columns(3)
+        f1.metric("Walls", int(feature_counts.get("walls", 0)))
+        f2.metric("Windows", int(feature_counts.get("windows", 0)))
+        f3.metric("Doors", int(feature_counts.get("doors", 0)))
+
+        tabs = st.tabs(["Entities", "Measurements", "Features", "Layers", "Entity Types"])
 
         with tabs[0]:
             st.dataframe(entities_df, width="stretch", hide_index=True)
@@ -94,6 +116,28 @@ if uploaded is not None:
             )
 
         with tabs[1]:
+            st.caption("Entities with at least one computed measurement value.")
+            st.dataframe(measurable_entities_df, width="stretch", hide_index=True)
+            st.download_button(
+                "Download measurements CSV",
+                measurable_entities_df.to_csv(index=False).encode("utf-8"),
+                file_name=f"{Path(uploaded.name).stem}_measurements.csv",
+                mime="text/csv",
+                width="stretch",
+            )
+
+        with tabs[2]:
+            st.caption("Entities classified as walls, windows, or doors.")
+            st.dataframe(features_df, width="stretch", hide_index=True)
+            st.download_button(
+                "Download features CSV",
+                features_df.to_csv(index=False).encode("utf-8"),
+                file_name=f"{Path(uploaded.name).stem}_features.csv",
+                mime="text/csv",
+                width="stretch",
+            )
+
+        with tabs[3]:
             st.dataframe(layers_df, width="stretch", hide_index=True)
             st.download_button(
                 "Download layers CSV",
@@ -103,7 +147,7 @@ if uploaded is not None:
                 width="stretch",
             )
 
-        with tabs[2]:
+        with tabs[4]:
             st.dataframe(types_df, width="stretch", hide_index=True)
             st.download_button(
                 "Download entity types CSV",

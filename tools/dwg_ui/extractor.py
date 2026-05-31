@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import math
 import os
 import shutil
 import subprocess
@@ -19,6 +20,8 @@ class ExtractionResult:
     entities: List[Dict[str, str]]
     layers: List[Dict[str, str]]
     entity_types: List[Dict[str, str]]
+    feature_counts: Dict[str, int]
+    feature_entities: List[Dict[str, str]]
     source_kind: str
     notes: List[str]
 
@@ -71,6 +74,138 @@ def get_odafc_status(converter_bin: Optional[Path]) -> Tuple[bool, str]:
     return False, "No ODA File Converter configured or found on PATH"
 
 
+def _normalized(value: str) -> str:
+    return value.lower().replace("-", " ").replace("_", " ")
+
+
+def _match_any(haystack: str, needles: List[str]) -> bool:
+    return any(token in haystack for token in needles)
+
+
+def _count_arch_features(entities: List[Dict[str, str]]) -> Dict[str, int]:
+    counts = {"walls": 0, "windows": 0, "doors": 0}
+    wall_tokens = ["wall", "partition", "masonry", "brick", "concrete"]
+    window_tokens = ["window", "wndw", "glazing", "fenestration", "win"]
+    door_tokens = ["door", "dr", "shutter", "entry", "entrance"]
+
+    for entity in entities:
+        entity_type = _normalized(entity.get("entity_type", ""))
+        layer = _normalized(entity.get("layer", ""))
+        block_name = _normalized(entity.get("block_name", ""))
+        searchable = " ".join([entity_type, layer, block_name]).strip()
+
+        if not searchable:
+            continue
+
+        if _match_any(searchable, wall_tokens):
+            counts["walls"] += 1
+        if _match_any(searchable, window_tokens):
+            counts["windows"] += 1
+        if _match_any(searchable, door_tokens):
+            counts["doors"] += 1
+
+    return counts
+
+
+def _classify_arch_feature(entity: Dict[str, str]) -> str:
+    entity_type = _normalized(entity.get("entity_type", ""))
+    layer = _normalized(entity.get("layer", ""))
+    block_name = _normalized(entity.get("block_name", ""))
+    searchable = " ".join([entity_type, layer, block_name]).strip()
+
+    if not searchable:
+        return ""
+
+    wall_tokens = ["wall", "partition", "masonry", "brick", "concrete"]
+    window_tokens = ["window", "wndw", "glazing", "fenestration", "win"]
+    door_tokens = ["door", "dr", "shutter", "entry", "entrance"]
+
+    matches: List[str] = []
+    if _match_any(searchable, wall_tokens):
+        matches.append("wall")
+    if _match_any(searchable, window_tokens):
+        matches.append("window")
+    if _match_any(searchable, door_tokens):
+        matches.append("door")
+
+    return ",".join(matches)
+
+
+def _annotate_feature_entities(entities: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    feature_rows: List[Dict[str, str]] = []
+    for entity in entities:
+        feature_type = _classify_arch_feature(entity)
+        if not feature_type:
+            continue
+        row = dict(entity)
+        row["feature_type"] = feature_type
+        feature_rows.append(row)
+    return feature_rows
+
+
+def _fmt_num(value: Optional[float]) -> str:
+    if value is None:
+        return ""
+    if not math.isfinite(value):
+        return ""
+    text = f"{value:.6f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _empty_measurement_fields() -> Dict[str, str]:
+    return {
+        "measurement_length": "",
+        "measurement_area": "",
+        "measurement_radius": "",
+        "measurement_perimeter": "",
+        "measurement_unit": "drawing_units",
+    }
+
+
+def _compute_entity_measurements(entity: ezdxf.entities.DXFGraphic) -> Dict[str, str]:
+    metrics = _empty_measurement_fields()
+    metrics["measurement_unit"] = "drawing_units"
+
+    e_type = entity.dxftype()
+
+    try:
+        if e_type == "LINE":
+            start = entity.dxf.start
+            end = entity.dxf.end
+            metrics["measurement_length"] = _fmt_num((end - start).magnitude)
+
+        elif e_type == "CIRCLE":
+            radius = float(entity.dxf.radius)
+            metrics["measurement_radius"] = _fmt_num(radius)
+            metrics["measurement_area"] = _fmt_num(math.pi * radius * radius)
+            metrics["measurement_perimeter"] = _fmt_num(2.0 * math.pi * radius)
+
+        elif e_type == "ARC":
+            radius = float(entity.dxf.radius)
+            start_angle = float(entity.dxf.start_angle)
+            end_angle = float(entity.dxf.end_angle)
+            sweep = (end_angle - start_angle) % 360.0
+            arc_len = math.radians(sweep) * radius
+            metrics["measurement_radius"] = _fmt_num(radius)
+            metrics["measurement_length"] = _fmt_num(arc_len)
+
+        elif e_type in {"LWPOLYLINE", "POLYLINE", "SPLINE", "ELLIPSE"}:
+            if hasattr(entity, "length") and callable(getattr(entity, "length")):
+                metrics["measurement_length"] = _fmt_num(float(entity.length()))
+
+        elif e_type in {"TEXT", "MTEXT", "INSERT", "POINT"}:
+            pass
+
+        else:
+            if hasattr(entity, "length") and callable(getattr(entity, "length")):
+                metrics["measurement_length"] = _fmt_num(float(entity.length()))
+
+    except Exception:
+        return metrics
+
+    return metrics
+
+
 def _extract_from_document(doc: ezdxf.document.Drawing, source_kind: str, notes: List[str]) -> ExtractionResult:
     msp = doc.modelspace()
 
@@ -84,7 +219,18 @@ def _extract_from_document(doc: ezdxf.document.Drawing, source_kind: str, notes:
         e_type = entity.dxftype()
         layer = getattr(entity.dxf, "layer", "0")
         handle = getattr(entity.dxf, "handle", "")
-        entities.append({"handle": str(handle), "entity_type": str(e_type), "layer": str(layer)})
+        block_name = ""
+        if e_type == "INSERT":
+            block_name = str(getattr(entity.dxf, "name", ""))
+        row = {
+            "handle": str(handle),
+            "entity_type": str(e_type),
+            "layer": str(layer),
+            "block_name": block_name,
+        }
+        row.update(_compute_entity_measurements(entity))
+        row["feature_type"] = _classify_arch_feature(row)
+        entities.append(row)
 
         type_counts[e_type] = type_counts.get(e_type, 0) + 1
         layer_counts[layer] = layer_counts.get(layer, 0) + 1
@@ -96,10 +242,19 @@ def _extract_from_document(doc: ezdxf.document.Drawing, source_kind: str, notes:
     for layer_name in sorted(all_layers):
         layers.append({"layer": layer_name, "entity_count": str(layer_counts.get(layer_name, 0))})
 
+    feature_counts = _count_arch_features(entities)
+    notes.append(
+        "feature-counts are heuristic (based on layer/block naming): "
+        f"walls={feature_counts['walls']}, windows={feature_counts['windows']}, doors={feature_counts['doors']}"
+    )
+    feature_entities = [row for row in entities if row.get("feature_type")]
+
     return ExtractionResult(
         entities=entities,
         layers=layers,
         entity_types=entity_types,
+        feature_counts=feature_counts,
+        feature_entities=feature_entities,
         source_kind=source_kind,
         notes=notes,
     )
@@ -174,6 +329,22 @@ def _default_extractor_path() -> Path:
     return repo_root / "libraries" / "libdxfrw" / "tools" / "dwg_entity_types"
 
 
+def _ensure_measurement_columns(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    for row in rows:
+        for key, default_value in _empty_measurement_fields().items():
+            if key not in row:
+                row[key] = default_value
+        if "block_name" not in row:
+            row["block_name"] = ""
+    return rows
+
+
+def _ensure_feature_type_column(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    for row in rows:
+        row["feature_type"] = _classify_arch_feature(row)
+    return rows
+
+
 def run_dwg_extractor(
     dwg_path: Path,
     extractor_bin: Optional[Path] = None,
@@ -222,13 +393,17 @@ def run_dwg_extractor(
         if not entities_csv.exists() or not layers_csv.exists() or not types_csv.exists():
             raise ExtractionError("DWG extraction completed but expected CSV outputs were not produced")
 
+        entities_rows = _ensure_feature_type_column(_ensure_measurement_columns(_read_csv_dict(entities_csv)))
         return ExtractionResult(
-            entities=_read_csv_dict(entities_csv),
+            entities=entities_rows,
             layers=_read_csv_dict(layers_csv),
             entity_types=_read_csv_dict(types_csv),
+            feature_counts=_count_arch_features(entities_rows),
+            feature_entities=[row for row in entities_rows if row.get("feature_type")],
             source_kind="dwg",
             notes=[
                 "Entities and layers were read directly from DWG.",
+                "Per-entity geometric measurements are unavailable in direct DWG mode; use odafc/DXF path for geometry-based metrics.",
                 f"stage[dwg_entity_types]: {_elapsed_s(stage_start)}s",
             ],
         )

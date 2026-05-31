@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import html
-import io
 import tempfile
 from pathlib import Path
 from typing import Dict, List
@@ -92,13 +91,18 @@ def extract() -> Response:
             )
 
     notes_html = "".join(f"<li>{html.escape(note)}</li>" for note in result.notes)
+    feature_counts = result.feature_counts or {"walls": 0, "windows": 0, "doors": 0}
     body = (
         "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>"
         "<title>DWG Extractor Results</title></head>"
         "<body style='font-family:Arial, sans-serif; margin:32px; max-width:1200px;'>"
         f"<h2>Source: {html.escape(result.source_kind.upper())}</h2>"
+        f"<p><strong>Walls:</strong> {int(feature_counts.get('walls', 0))} &nbsp; "
+        f"<strong>Windows:</strong> {int(feature_counts.get('windows', 0))} &nbsp; "
+        f"<strong>Doors:</strong> {int(feature_counts.get('doors', 0))}</p>"
         f"<p><a href='/'>Upload another file</a></p><ul>{notes_html}</ul>"
         f"{_render_table('Entities', result.entities)}"
+        f"{_render_table('Features', result.feature_entities)}"
         f"{_render_table('Layers', result.layers)}"
         f"{_render_table('Entity Types', result.entity_types)}"
         "</body></html>"
