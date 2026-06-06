@@ -789,7 +789,7 @@ QG_GraphicView* QC_ApplicationWindow::setupNewGraphicView(const QC_MDIWindow* w)
 
 bool QC_ApplicationWindow::newDrawingFromTemplate(const QString &fileName, QC_MDIWindow *w) {
     bool ret = false;
-    RS2::FormatType type = RS2::FormatDXFRW;
+    RS2::FormatType type = RS2::FormatUnknown;
 
     QApplication::setOverrideCursor(QCursor(Qt::WaitCursor));
     showStatusMessage(tr("Creating new file..."));
@@ -801,6 +801,7 @@ bool QC_ApplicationWindow::newDrawingFromTemplate(const QString &fileName, QC_MD
         ret = true;
     } else {
         // loads the template file in the new view:
+        // Use unknown format so DWG template files are detected correctly.
         ret = w->loadDocumentFromTemplate(fileName, type);
     }
 
