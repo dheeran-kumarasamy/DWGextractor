@@ -104,3 +104,33 @@ There is a [resources repository](https://github.com/LibreCAD/Resources) for peo
 contribute to the project by supplying icons, stylesheets, documentation, templates...
 
 Associated downloads: <https://sourceforge.net/projects/librecad/files/Resources/>
+
+## DWG Floor Plan Extraction Service
+
+A new FastAPI-based extractor is available in this repository under `app/`. It supports:
+- `.dxf` uploads directly via `ezdxf.recover.readfile`
+- `.dwg` uploads via ODA File Converter when `ODA_CONVERTER_PATH` is configured
+- legend-driven hatch classification and wall/column thickness extraction
+- normalized millimetre output with source-unit reporting
+
+### Environment variables
+
+- `ODA_CONVERTER_PATH` — full path to the ODA File Converter executable
+- `ODA_OUTPUT_VERSION` — target DXF version (default `ACAD2013`)
+- `MAX_UPLOAD_MB` — maximum upload size in megabytes (default `50`)
+- `TEMP_DIR` — temporary working directory for DWG conversion
+
+### Running in Docker
+
+```bash
+docker build -t librecad-dwg-extractor .
+docker run --rm -p 8000:8000 \
+  -e ODA_CONVERTER_PATH=/path/to/ODAFileConverter \
+  librecad-dwg-extractor
+```
+
+### DWG / DXF notes
+
+- This extractor relies on an external ODA converter for `.dwg` files.
+- If `ODA_CONVERTER_PATH` is missing, `.dwg` uploads return a clear error, but `.dxf` uploads still work.
+- For best results from AEC-derived drawings, export from AutoCAD with `EXPORTTOAUTOCAD` and target `AutoCAD 2013` DXF.
