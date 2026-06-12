@@ -138,6 +138,68 @@ def _stair_candidate(distance_mm: float) -> bool:
     return abs(distance_mm - STAIR_SPACING_MM) <= 15.0
 
 
+def _get_line_params(line: Any, ctx: UnitContext) -> Optional[Tuple[float, float, float, float, float, float, float]]:
+    if not hasattr(line, "dxf") or not hasattr(line.dxf, "start") or not hasattr(line.dxf, "end"):
+        return None
+    start = _point_xy(line.dxf.start)
+    end = _point_xy(line.dxf.end)
+    x1, y1 = start[0] * ctx.to_mm, start[1] * ctx.to_mm
+    x2, y2 = end[0] * ctx.to_mm, end[1] * ctx.to_mm
+    dx = x2 - x1
+    dy = y2 - y1
+    length = math.hypot(dx, dy)
+    if length == 0:
+        return None
+    ux = dx / length
+    uy = dy / length
+    return (x1, y1, x2, y2, ux, uy, length)
+
+
+def _is_parallel_wall_pair(line_a: Any, line_b: Any, ctx: UnitContext) -> Optional[float]:
+    params_a = _get_line_params(line_a, ctx)
+    params_b = _get_line_params(line_b, ctx)
+    if not params_a or not params_b:
+        return None
+
+    x1_a, y1_a, x2_a, y2_a, ux_a, uy_a, len_a = params_a
+    x1_b, y1_b, x2_b, y2_b, ux_b, uy_b, len_b = params_b
+
+    # Parallel check within ~5 degrees (cos(5 deg) ~ 0.996)
+    dot = abs(ux_a * ux_b + uy_a * uy_b)
+    if dot < 0.996:
+        return None
+
+    # Perpendicular distance:
+    # Distance from start point of a to infinite line of b.
+    # Normal vector of b is (-uy_b, ux_b)
+    nx = -uy_b
+    ny = ux_b
+    dist = abs((x1_a - x1_b) * nx + (y1_a - y1_b) * ny)
+
+    # Realistic wall thickness constraints
+    if not (50.0 <= dist <= 600.0):
+        return None
+
+    if _stair_candidate(dist):
+        return None
+
+    # Projection/Overlap check:
+    # Project endpoints onto unit vector (ux_b, uy_b)
+    proj_a1 = x1_a * ux_b + y1_a * uy_b
+    proj_a2 = x2_a * ux_b + y2_a * uy_b
+    proj_b1 = x1_b * ux_b + y1_b * uy_b
+    proj_b2 = x2_b * ux_b + y2_b * uy_b
+
+    min_a, max_a = min(proj_a1, proj_a2), max(proj_a1, proj_a2)
+    min_b, max_b = min(proj_b1, proj_b2), max(proj_b1, proj_b2)
+
+    overlap = min(max_a, max_b) - max(min_a, min_b)
+    if overlap < 50.0:
+        return None
+
+    return dist
+
+
 def _line_thickness_candidates(doc: Any, ctx: UnitContext) -> List[float]:
     lines = [entity for entity in doc.modelspace() if entity.dxftype() == "LINE" and _is_wall_layer(entity.dxf.layer)]
     candidates: List[float] = []
@@ -257,10 +319,78 @@ class WallExtractor(BaseExtractor):
             type_row["thickness_mm"] = round(thickness, 2)
             type_row["segment_lengths_mm"] = sorted({*type_row["segment_lengths_mm"], *segments})
 
+        warnings: List[str] = []
+        # Fallback to line-based wall extraction if no wall types were extracted from hatches
+        if not wall_types:
+            wall_lines = [
+                entity
+                for entity in doc.modelspace()
+                if entity.dxftype() == "LINE" and _is_wall_layer(entity.dxf.layer)
+            ]
+
+            pairs = []
+            for line_a, line_b in itertools.combinations(wall_lines, 2):
+                dist = _is_parallel_wall_pair(line_a, line_b, unit_ctx)
+                if dist is not None:
+                    pairs.append((line_a, line_b, dist))
+
+            grouped_thicknesses: Dict[float, List[Tuple[Any, Any]]] = {}
+            for la, lb, dist in pairs:
+                matched_thickness = None
+                for t in grouped_thicknesses.keys():
+                    if abs(t - dist) <= 5.0:
+                        matched_thickness = t
+                        break
+                if matched_thickness is None:
+                    matched_thickness = round(dist, 1)
+                    grouped_thicknesses[matched_thickness] = []
+                grouped_thicknesses[matched_thickness].append((la, lb))
+
+            if grouped_thicknesses:
+                warnings.append(
+                    "No walls found via hatch entities; fell back to line-based wall extraction."
+                )
+
+            for thickness, p_list in grouped_thicknesses.items():
+                segment_lengths = set()
+                layers = set()
+                for la, lb in p_list:
+                    layers.add(la.dxf.layer)
+                    layers.add(lb.dxf.layer)
+
+                    params_a = _get_line_params(la, unit_ctx)
+                    params_b = _get_line_params(lb, unit_ctx)
+                    if params_a:
+                        segment_lengths.add(round(params_a[6], 2))
+                    if params_b:
+                        segment_lengths.add(round(params_b[6], 2))
+
+                layer_name = sorted(list(layers))[0] if layers else "wall_layer"
+
+                sig = {
+                    "pattern": "LINE",
+                    "solid": False,
+                    "angle": 0.0,
+                    "angle_bucket": 0.0,
+                    "color": 256,
+                    "scale": 1.0,
+                    "layer": layer_name,
+                }
+                key = (f"LINE_{thickness}", 0.0)
+
+                wall_types[key] = {
+                    "label": f"Wall ({layer_name}, {thickness}mm)",
+                    "role": "wall",
+                    "signature": sig,
+                    "thickness_mm": round(thickness, 2),
+                    "segment_lengths_mm": sorted(list(segment_lengths)),
+                    "count": len(p_list),
+                }
+
         columns = _extract_block_hatches(doc, unit_ctx)
         data = {
             "wall_types": list(wall_types.values()),
             "columns": columns,
             "line_thickness_candidates_mm": line_thicknesses,
         }
-        return extractor_result(data)
+        return extractor_result(data, warnings)
